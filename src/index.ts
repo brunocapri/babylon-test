@@ -11,7 +11,7 @@ export const babylonInit = async (): Promise<void> => {
     const moduleName = getModuleToLoad();
     const createSceneModule = await getSceneModuleWithName(moduleName);
     const engineType =
-        location.search.split("engine=")[1]?.split("&")[0] || "webgl";
+        location.search.split("engine=")[1]?.split("&")[0] || "webgpu";
     // Execute the pretasks, if defined
     await Promise.all(createSceneModule.preTasks || []);
     // Get the canvas element
@@ -19,6 +19,7 @@ export const babylonInit = async (): Promise<void> => {
     // Generate the BABYLON 3D engine
     let engine: Engine;
     if (engineType === "webgpu") {
+        console.log('WEBGPU')
         const webGPUSupported = await WebGPUEngine.IsSupportedAsync;
         if (webGPUSupported) {
             const webgpu = engine = new WebGPUEngine(canvas, {
@@ -39,10 +40,14 @@ export const babylonInit = async (): Promise<void> => {
 
     // JUST FOR TESTING. Not needed for anything else
     (window as any).scene = scene;
-
+    const divFps = document.getElementById("fps");
     // Register a render loop to repeatedly render the scene
     engine.runRenderLoop(function () {
         scene.render();
+        if(divFps) {
+            divFps.innerHTML = engine.getFps().toFixed() + " fps";
+        }
+        
     });
 
     // Watch for browser/canvas resize events
