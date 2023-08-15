@@ -68,7 +68,7 @@ class PhysicsSceneWithHavok implements CreateSceneClass {
         spaceshipBody.setMassProperties({
             mass: 800,
             inertia: new Vector3(1, 1, 1),
-            centerOfMass: new Vector3(0, -0.9, 0)
+            centerOfMass: new Vector3(0, -0.9, -0.2)
         });
 
 
@@ -102,11 +102,14 @@ class PhysicsSceneWithHavok implements CreateSceneClass {
 
                 w.onUpdate(dt)
             })
-
+            
+            // DEBUG JUMP
             if (input.controls.jump) {
                 const upVector = Vector3.Up().scale(15000 * scene.getEngine().getDeltaTime() / 1000)
                 spaceshipBody.applyImpulse(upVector, spaceshipMesh.position)
             }
+
+
         })
 
         return scene;
@@ -120,7 +123,7 @@ class FNWheel {
     /** Relative to spaceship position */
     position: Vector3
     radius = 0.5
-    springRestLength = 1
+    springRestLength = 0.6
     springStiffness = 10
     dampingCompression = 1.4
     dampingRelaxation = 2.3
@@ -136,6 +139,10 @@ class FNWheel {
     spaceshipBody: PhysicsBody
 
     steering: FNAckSteering
+    engine: FNEngine
+
+    input: FNInput
+
 
     constructor(name: string, position: Vector3, scene: Scene, spaceshipMesh: Mesh, spaceshipBody: PhysicsBody) {
         this.name = name
@@ -146,7 +153,12 @@ class FNWheel {
         this.scene = scene
         this.spaceshipBody = spaceshipBody
 
+        // TODO just instantiate if lf or rf
         this.steering = new FNAckSteering(scene, this)
+
+        this.engine = new FNEngine(this)
+
+        this.input = FNInput.getInstance(scene)
 
         FNDebug.AxisView(scene, this.mesh)
     }
@@ -167,12 +179,14 @@ class FNWheel {
                 const offset = this.springRestLength - distance
 
                 // TODO check is in contact
+                // TODO break suspension into another class 
+
                 // Checking whether the wheel is traveling exactly the opposite direction from the normal or not
                 // -1 = opposite direction, 1 = same direction
                 const project = Vector3.Dot(raycastResult.hitNormalWorld, worldDirection)
 
                 const spaceshipVelocityAtContactPoint = new Vector3()
-                this.velocityAt(this.spaceshipBody, raycastResult.hitPointWorld, spaceshipVelocityAtContactPoint)
+                FNHelper.velocityAt(this.spaceshipBody, raycastResult.hitPointWorld, spaceshipVelocityAtContactPoint)
 
                 const projectedVelocity = Vector3.Dot(spaceshipVelocityAtContactPoint, raycastResult.hitNormalWorld);
 
@@ -203,8 +217,8 @@ class FNWheel {
                 force -= suspensionDamping * this.suspensionRelativeVelocity
                 const suspensionForce = force * this.spaceshipBody.getMassProperties().mass!
                 if (suspensionForce > 0) {
-                    const impulse = new Vector3().copyFrom(raycastResult.hitNormalWorld).scaleInPlace(suspensionForce * dt);
-                    this.spaceshipBody.applyImpulse(impulse, raycastResult.hitPointWorld)
+                    const impulse = new Vector3().copyFrom(raycastResult.hitNormalWorld).scaleInPlace(suspensionForce* 100 * dt);
+                    this.spaceshipBody.applyForce(impulse, raycastResult.hitPointWorld)
                 }
 
 
@@ -215,18 +229,16 @@ class FNWheel {
             this.invContactDotSuspension = 1.0
         }
 
-        // Steering applied to front tires
-        if (this.name == 'lf' || this.name == 'rf') {
-            const ackAngle = this.steering.update(dt)
-            const entityRot = this.mesh.rotationQuaternion?.clone() ?? new Quaternion();
-            entityRot.copyFrom(Quaternion.RotationYawPitchRoll(
-                Tools.ToRadians(ackAngle * 3),
-                entityRot.toEulerAngles().x,
-                entityRot.toEulerAngles().z
-            ))
-            this.mesh.rotationQuaternion = entityRot;
-        }
+        this.steer(dt)
 
+        this.engine.onUpdate(dt)
+
+    }
+
+    steer(dt: number){
+        
+            this.steering.onUpdate(dt)
+        
     }
 
     getAbsolutePosition() {
@@ -237,25 +249,17 @@ class FNWheel {
         return this.mesh.getWorldMatrix()
     }
 
-    velocityAt(body: PhysicsBody, pos: Vector3, res: Vector3) {
-        const tmpVel2 = new Vector3()
-        body.getObjectCenterWorldToRef(tmpVel2)
-        pos.subtractToRef(tmpVel2, res)
-        body.getAngularVelocityToRef(tmpVel2)
-        Vector3.CrossToRef(tmpVel2, res, res)
-        body.getLinearVelocityToRef(tmpVel2)
-        res.addInPlace(tmpVel2)
-        return res;
-    }
+    
 }
 
-
-// Ackermann
 class FNAckSteering {
     steeringRate: number = 10;
     turnRadius: number = 10;
     wheelBase: number = 2.5;
     rearTrack: number = 1.5;
+
+    wheelGrip = 0.7;
+    wheelMass = 3;
 
     wheel: FNWheel
     input: FNInput
@@ -302,13 +306,102 @@ class FNAckSteering {
         }
     }
 
-    // Should be called each frame
-    update(dt: number) {
-        this.calculateSteerInput(dt)
-        this.calculateAckAngles()
-        return this.wheel.name === 'lf' ? this.ackermannAngleLeft : this.ackermannAngleRight
+
+    private rotateWheel() {
+        const entityRot = this.wheel.mesh.rotationQuaternion?.clone() ?? new Quaternion();
+        entityRot.copyFrom(Quaternion.RotationYawPitchRoll(
+            Tools.ToRadians(this.wheel.name === 'lf' ? this.ackermannAngleLeft * 3 : this.ackermannAngleRight * 3),
+            entityRot.toEulerAngles().x,
+            entityRot.toEulerAngles().z
+        ))
+        this.wheel.mesh.rotationQuaternion = entityRot;
     }
 
+    private steer(dt: number) {
+        const steeringDir = this.wheel.mesh.right;
+        const wheelWorldVelocity = new Vector3();
+        FNHelper.velocityAt(this.wheel.spaceshipBody, this.wheel.getAbsolutePosition(), wheelWorldVelocity);
+
+        const steeringVelocity = Vector3.Dot(wheelWorldVelocity, steeringDir);
+        const desiredVelocityChange = -steeringVelocity * this.wheelGrip;
+        const desiredAcceleration = desiredVelocityChange / dt;
+
+        this.wheel.spaceshipBody.applyForce(steeringDir.scaleInPlace(desiredAcceleration).scaleInPlace(this.wheelMass), this.wheel.getAbsolutePosition())
+    }
+
+    private drift() {
+        if (this.input.controls.brake) {
+            this.wheelGrip = 0
+        }
+    }
+
+    // Should be called each frame
+    onUpdate(dt: number) {
+        if(this.wheel.name === 'lf' || this.wheel.name === 'rf') {
+            this.calculateSteerInput(dt)
+            this.calculateAckAngles()
+            this.rotateWheel()
+        }
+        this.steer(dt)
+        this.drift()
+    }
+
+}
+
+class FNEngine {
+    wheel: FNWheel
+    enginePower = 100000
+    breakPower = 100000
+
+    input: FNInput
+
+    constructor(wheel: FNWheel) {
+        this.wheel = wheel
+        this.input = FNInput.getInstance(wheel.scene)
+    }
+
+    accelerate(dt: number) {
+        // TODO Debug delete after
+        const linearVel = new Vector3()
+        this.wheel.spaceshipBody.getLinearVelocityToRef(linearVel)
+        console.log('', linearVel.length())
+
+        // FNDebug.DrawLine(this.wheel.scene, this.wheel.getAbsolutePosition(), linearVel.clone().normalize(), linearVel.length(), new Color3(1, 0, 0))
+
+        if (!this.input.controls.forward){
+            // Natural deceleration
+            this.decelerate(dt, 8000)
+            return 
+        }
+        
+        const accelerationDirection = this.wheel.mesh.forward
+        this.wheel.spaceshipBody.applyForce(accelerationDirection.clone().scaleInPlace(this.enginePower * dt), this.wheel.getAbsolutePosition())
+    }
+
+    break(dt: number) {
+        if (!this.input.controls.backward) return
+        this.decelerate(dt, this.breakPower)
+    }
+
+    decelerate(dt: number, amount: number) {
+        
+        const spaceshipVelocity = new Vector3()
+        this.wheel.spaceshipBody.getLinearVelocityToRef(spaceshipVelocity)
+        const normalizedVel = new Vector3()
+        spaceshipVelocity.normalizeToRef(normalizedVel)
+
+        const isGoingForward = Vector3.Dot(this.wheel.mesh.forward, spaceshipVelocity) > 0
+
+        if(isGoingForward && spaceshipVelocity.length() > 0.1) {
+            const decelerationDirection = this.wheel.mesh.forward.clone().negate()
+            this.wheel.spaceshipBody.applyForce(decelerationDirection.clone().scaleInPlace(dt * amount), this.wheel.getAbsolutePosition())
+        }
+    }
+
+    onUpdate(dt: number) {
+        this.accelerate(dt)
+        this.break(dt)
+    }
 }
 
 
@@ -366,7 +459,6 @@ class FNInput {
 }
 
 class FNDebug {
-
     static DrawLine(scene: Scene, start: Vector3, direction: Vector3, length: number, color: Color3) {
         const end = start.add(direction.scale(length));
         const points = [start, end];
@@ -386,6 +478,17 @@ class FNDebug {
 class FNHelper {
     static clamp(value: number, min: number, max: number) {
         return Math.min(Math.max(value, min), max);
+    }
+
+    static velocityAt(body: PhysicsBody, pos: Vector3, res: Vector3) {
+        const tmpVel2 = new Vector3()
+        body.getObjectCenterWorldToRef(tmpVel2)
+        pos.subtractToRef(tmpVel2, res)
+        body.getAngularVelocityToRef(tmpVel2)
+        Vector3.CrossToRef(tmpVel2, res, res)
+        body.getLinearVelocityToRef(tmpVel2)
+        res.addInPlace(tmpVel2)
+        return res;
     }
 }
 
